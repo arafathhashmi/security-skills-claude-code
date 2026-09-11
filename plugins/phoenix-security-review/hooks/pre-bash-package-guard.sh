@@ -114,19 +114,48 @@ log "package install detected: ecosystem=$ECO pm=$PM"
 # matches "pip3 install", and key "go:goget" gives PM=goget, which never matches
 # "go get". In both cases nothing was stripped, so the command name itself leaked
 # into the package list as a pseudo-package (pip3, go, get).
-TAIL="$(printf '%s' "${CMD#*"$PM_MATCH"}" \
-  | tr ' ' '\n' \
+# tr '[:space:]', not tr ' '. The detector accepts any whitespace between a package
+# manager and its arguments, so `npm install event-stream<TAB>lodash` arrived here as
+# a single tab-containing token. The validity grep dropped it, PACKAGES came out
+# empty, and the hook returned allow having checked neither name — one of which,
+# event-stream, is on the built-in blocklist forty lines below.
+CANDIDATES="$(printf '%s' "${CMD#*"$PM_MATCH"}" \
+  | tr '[:space:]' '\n' \
+  | grep -E -v '^$' \
   | grep -E -v '^(-|--)' \
-  | grep -E -v '^(install|add|i|--save|--save-dev|--dev|-D|-g|--global)$' \
-  | grep -E '^[a-zA-Z0-9@._/+:~^=<>-]+$' \
-  | head -20)"
+  | grep -E -v '^(install|add|i|--save|--save-dev|--dev|-D|-g|--global)$')"
+
+CANDIDATE_COUNT="$(printf '%s' "$CANDIDATES" | grep -c -E '^.+$' || true)"
+
+# Extras belong in the whitelist. `pip install requests[socks]` is ordinary, and
+# clean_pkg strips the bracket anyway (the ${p%%[[<>=!~^]*} below), so rejecting
+# [ ] and , here did nothing but empty PACKAGES and turn a check into an allow.
+# Bracket expression ordered for POSIX: ] first, - last.
+PKG_CHARS="]a-zA-Z0-9@._/+:~^=<>,\"'[-"
+TAIL="$(printf '%s' "$CANDIDATES" | grep -E "^[$PKG_CHARS]+\$" | head -20)"
 
 PACKAGES=()
 while IFS= read -r p; do
+  # `npm install "event-stream"` is ordinary. Dropping the token for its quotes
+  # emptied PACKAGES, which is the same fail-open by another route, so quotes are
+  # allowed through the whitelist above and trimmed here instead.
+  p="${p%\"}"; p="${p#\"}"
+  p="${p%'}"; p="${p#'}"
   [[ -n "$p" ]] && PACKAGES+=("$p")
 done <<< "$TAIL"
 
+# An install with no package argument is ordinary — `npm install` from a lockfile,
+# `pip install -r requirements.txt`. An install whose arguments ALL failed the
+# whitelist is not, and until now the two were indistinguishable: both returned
+# allow. Every bypass found in this function has ended on that line, so the two
+# cases are separated here and the second one asks.
 if [[ ${#PACKAGES[@]} -eq 0 ]]; then
+  if [[ "$CANDIDATE_COUNT" -gt 0 ]]; then
+    log "ASK: install command whose arguments could not be read: $CMD"
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":%s}}\n' \
+      "$(printf '%s' "This is a package install, but none of its arguments could be read as a package name, so nothing was checked against the blocklist. Proceed only if you recognise the command." | jsonenc)"
+    exit 0
+  fi
   emit_json PreToolUse permissionDecision '"allow"'
   exit 0
 fi
@@ -159,6 +188,13 @@ ruby:rest-client-2
 # ---- Heuristic checks per package ----
 DENY_REASONS=()
 ASK_REASONS=()
+
+# `head -20` bounds the work above. Dropping the rest without a word would be the
+# same fail-open in a different coat: `npm install <20 harmless> evil` would report
+# on twenty names and stay silent about the twenty-first.
+if [[ "$CANDIDATE_COUNT" -gt 20 ]]; then
+  ASK_REASONS+=("This command names $CANDIDATE_COUNT packages; only the first 20 were checked.")
+fi
 
 # Popular package names per ecosystem for typosquat distance check.
 # Edit-distance 1–2 against these names => suspicious (ask).
