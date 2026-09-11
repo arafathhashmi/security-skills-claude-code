@@ -143,32 +143,14 @@ jobs:
           fi
           echo "no .env files"
 
-      - name: Key-shaped literals outside examples and docs
-        run: |
-          python3 - <<'PY'
-          import os, re, sys
-          pat  = re.compile(r'(api[_-]?key|secret|password|passwd|token|private[_-]?key)\s*[:=]\s*["\']([^"\']{12,})["\']', re.I)
-          safe = re.compile(r'example|CHANGEME|your_|<your|placeholder|xxx|dummy|REPLACE|\.\.\.|sk-live-1234|eyJ\.token', re.I)
-          # A value containing $ is an interpolation, not a literal:
-          #   BRAVE_API_KEY="$DEFAULT_BRAVE_KEY"   <- reads a variable, ships no secret
-          interp = re.compile(r'[$]')
-          hits = []
-          for root, dirs, files in os.walk('.'):
-              dirs[:] = [d for d in dirs if d not in ('.git', 'node_modules', '.venv')]
-              for f in files:
-                  if f.endswith(('.md', '.example')):
-                      continue
-                  p = os.path.join(root, f)
-                  try:
-                      text = open(p, encoding='utf-8', errors='ignore').read()
-                  except OSError:
-                      continue
-                  for i, line in enumerate(text.split('\n'), 1):
-                      m = pat.search(line)
-                      if m and not safe.search(m.group(2)) and not interp.search(m.group(2)):
-                          hits.append(f"{p}:{i}: {line.strip()[:100]}")
-          for h in hits:
-              print(f"::error::{h}")
-          print(f"{len(hits)} suspicious literal(s)")
-          sys.exit(1 if hits else 0)
-          PY
+      # The scanner used to live inline here, where it could not be run without pushing
+      # and could not be tested at all. Four bypasses shipped that way: quoting was
+      # required so a bare assignment passed, only the first match on a line was read,
+      # .md was excluded wholesale, and any `$` in a value counted as interpolation.
+      # It is a script with cases now, and the cases run first — a gate whose own test
+      # is failing has no business reporting a clean tree.
+      - name: The scanner's own cases
+        run: python3 scripts/test-scan-secrets.py
+
+      - name: Key-shaped literals outside narrowly-identified example files
+        run: python3 scripts/scan-secrets.py
